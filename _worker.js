@@ -1,4 +1,4 @@
-﻿const Version = '2026-09-04 16:24:13';
+const Version = '2026-09-04 16:24:13';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io';
@@ -89,28 +89,110 @@ export default {
 					return new Response('重定向中...', { status: 302, headers: { 'Location': `/sub?${params.toString()}` } });
 				} else if (访问路径 === 'login') {//处理登录页面和登录请求
 					const cookies = request.headers.get('Cookie') || '';
-					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
-					if (authCookie == await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/admin' } });
+					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1]
+						|| url.searchParams.get('auth')
+						|| url.searchParams.get('token')
+						|| request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
+					const expected1 = await MD5MD5(UA + 加密秘钥 + 管理员密码);
+					const expected2 = await MD5MD5(加密秘钥 + 管理员密码);
+					if (authCookie && (authCookie === expected1 || authCookie === expected2)) {
+						return new Response('重定向中...', { status: 302, headers: { 'Location': `/admin?auth=${authCookie}` } });
+					}
 					if (request.method === 'POST') {
-						const formData = await request.text();
-						const params = new URLSearchParams(formData);
-						const 输入密码 = params.get('password');
-						if (输入密码 === (typeof 管理员密码 === 'string' ? 管理员密码.replace(/[\r\n]/g, '') : 管理员密码)) {
-							// 密码正确，设置cookie并返回成功标记
-							const 响应 = new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
-							响应.headers.set('Set-Cookie', `auth=${await MD5MD5(UA + 加密秘钥 + 管理员密码)}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=Lax`);
+						let 输入密码 = '';
+						const reqText = await request.text();
+						try {
+							const json = JSON.parse(reqText);
+							if (json && json.password !== undefined) 输入密码 = String(json.password).trim();
+						} catch (_) {}
+						if (!输入密码) {
+							const params = new URLSearchParams(reqText);
+							输入密码 = (params.get('password') || '').trim();
+						}
+						const 实际密码 = (typeof 管理员密码 === 'string' ? 管理员密码.replace(/[\r\n]/g, '').trim() : String(管理员密码).trim());
+						if (输入密码 === 实际密码) {
+							// 密码正确，设置cookie并返回成功标记与token
+							const token = expected1;
+							const 响应 = new Response(JSON.stringify({ success: true, token }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+							响应.headers.set('Set-Cookie', `auth=${token}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=None; Partitioned`);
 							return 响应;
+						} else {
+							return new Response(JSON.stringify({ success: false, message: '密码错误 (Invalid password)' }), { status: 401, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 						}
 					}
-					return fetch(Pages静态页面 + '/login');
+					return new Response(await loginPageHTML(), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
-					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
+					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1]
+						|| url.searchParams.get('auth')
+						|| url.searchParams.get('token')
+						|| request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
+					const expected1 = await MD5MD5(UA + 加密秘钥 + 管理员密码);
+					const expected2 = await MD5MD5(加密秘钥 + 管理员密码);
+					const isAuthed = authCookie && (authCookie === expected1 || authCookie === expected2);
 					// 没有cookie或cookie错误，跳转到/login页面
-					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					if (!isAuthed) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					if (访问路径 === 'admin/log.json') {// 读取日志内容
 						const 读取日志内容 = await env.KV.get('log.json') || '[]';
 						return new Response(读取日志内容, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
+					} else if (访问路径 === 'admin/live-logs/sse') {// 实时日志 SSE 流
+						let unsubscribe = null;
+						let pingTimer = null;
+						const stream = new ReadableStream({
+							start(controller) {
+								const encoder = new TextEncoder();
+								const send = (chunk) => {
+									try { controller.enqueue(encoder.encode(chunk)); } catch (_) {}
+								};
+								// 发送初始已存在的最近日志列表
+								const history = globalThis.__liveLogger ? globalThis.__liveLogger.getRecent(150) : [];
+								send(`event: init\ndata: ${JSON.stringify(history)}\n\n`);
+								
+								// 订阅后续实时日志
+								if (globalThis.__liveLogger) {
+									unsubscribe = globalThis.__liveLogger.subscribe(controller);
+								}
+
+								// 定期心跳包保持长连接活跃
+								pingTimer = setInterval(() => {
+									send(`event: ping\ndata: {"time":${Date.now()}}\n\n`);
+								}, 15000);
+							},
+							cancel() {
+								if (unsubscribe) unsubscribe();
+								if (pingTimer) clearInterval(pingTimer);
+							}
+						});
+						return new Response(stream, {
+							status: 200,
+							headers: {
+								'Content-Type': 'text/event-stream; charset=utf-8',
+								'Cache-Control': 'no-cache, no-transform',
+								'Connection': 'keep-alive',
+								'X-Accel-Buffering': 'no'
+							}
+						});
+					} else if (访问路径 === 'admin/live-logs/json') {// 获取最新实时日志 JSON
+						const logs = globalThis.__liveLogger ? globalThis.__liveLogger.getRecent(150) : [];
+						return new Response(JSON.stringify({ success: true, count: logs.length, data: logs }), {
+							status: 200,
+							headers: { 'Content-Type': 'application/json;charset=utf-8' }
+						});
+					} else if (访问路径 === 'admin/live-logs/ping') {// 触发测试日志
+						const pingItem = globalThis.__liveLogger?.add('info', 'TEST', `收到管理员控制台测试心跳 (来源 IP: ${request.headers.get('CF-Connecting-IP') || '127.0.0.1'})`, {
+							ua: request.headers.get('User-Agent') || 'Unknown',
+							colo: request.cf?.colo || 'LOCAL'
+						});
+						return new Response(JSON.stringify({ success: true, message: '测试日志已广播', log: pingItem }), {
+							status: 200,
+							headers: { 'Content-Type': 'application/json;charset=utf-8' }
+						});
+					} else if (访问路径 === 'admin/live-logs/clear') {// 清空实时日志
+						globalThis.__liveLogger?.clear();
+						return new Response(JSON.stringify({ success: true, message: '实时日志已清空' }), {
+							status: 200,
+							headers: { 'Content-Type': 'application/json;charset=utf-8' }
+						});
 					} else if (区分大小写访问路径 === 'admin/getCloudflareUsage') {// 查询请求量
 						try {
 							const Usage_JSON = await getCloudflareUsage(url.searchParams.get('Email'), url.searchParams.get('GlobalAPIKey'), url.searchParams.get('AccountID'), url.searchParams.get('APIToken'));
@@ -295,7 +377,764 @@ export default {
 					}
 
 					ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-					return fetch(Pages静态页面 + '/admin' + url.search);
+					const adminRes = await fetch(Pages静态页面 + '/admin' + url.search);
+					let html = await adminRes.text();
+					html = html.replace(/<h1 id="pageTitle">.*?<\/h1>/, '<h1 id="pageTitle">接督的梯子 设置页面</h1>');
+					html = html.replaceAll("|| 'edgetunnel'", "|| '接督的梯子'");
+
+					// 注入实时日志 CSS 样式
+					const liveLogStyles = `
+<style id="live-log-custom-styles">
+  .btn-live-logs {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    border: none !important;
+    box-shadow: 0 2px 10px rgba(16, 185, 129, 0.3) !important;
+    transition: all 0.2s ease !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    cursor: pointer !important;
+  }
+  .btn-live-logs:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(16, 185, 129, 0.45) !important;
+  }
+  /* 确保在小白模式/专家模式切换时，实时日志模块始终可见 */
+  .card-container.simple-mode #liveLogsModule,
+  .simple-mode #liveLogsModule {
+    display: block !important;
+    opacity: 1 !important;
+    max-height: none !important;
+    transform: none !important;
+    pointer-events: auto !important;
+    margin-top: 20px !important;
+    margin-bottom: 20px !important;
+  }
+  /* 常驻悬浮实时日志按钮 */
+  #liveLogsFloatingBtn {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 16px;
+    background: rgba(17, 24, 39, 0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    color: #f9fafb;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 9999px;
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 12px rgba(16, 185, 129, 0.25);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  #liveLogsFloatingBtn:hover {
+    transform: translateY(-2px) scale(1.03);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5), 0 0 20px rgba(16, 185, 129, 0.45);
+    border-color: #10b981;
+    background: rgba(17, 24, 39, 0.98);
+  }
+  .live-float-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #10b981;
+    box-shadow: 0 0 8px #10b981;
+    animation: pulse-green 2s infinite;
+  }
+  .live-float-badge {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+    border-radius: 12px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-weight: 700;
+  }
+  .live-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+  }
+  .live-status-badge.paused {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+    border-color: rgba(245, 158, 11, 0.3);
+  }
+  .live-status-badge.disconnected {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #10b981;
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+    animation: pulse-green 2s infinite;
+  }
+  .live-status-badge.paused .pulse-dot {
+    background-color: #f59e0b;
+    animation: none;
+    box-shadow: none;
+  }
+  .live-status-badge.disconnected .pulse-dot {
+    background-color: #ef4444;
+    animation: none;
+    box-shadow: none;
+  }
+  @keyframes pulse-green {
+    0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+    70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+    100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  }
+  .live-log-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .live-filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .log-filter-btn {
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 6px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    background: rgba(255, 255, 255, 0.6);
+    color: #475569;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  body.dark-mode .log-filter-btn, .dark-mode .log-filter-btn {
+    background: rgba(30, 41, 59, 0.7);
+    color: #cbd5e1;
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+  .log-filter-btn.active, .log-filter-btn:hover {
+    background: #3b82f6 !important;
+    color: #ffffff !important;
+    border-color: #3b82f6 !important;
+  }
+  .live-action-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .live-search-wrapper input {
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    background: rgba(255, 255, 255, 0.85);
+    color: inherit;
+    outline: none;
+    width: 170px;
+    transition: width 0.2s ease;
+  }
+  .live-search-wrapper input:focus {
+    width: 220px;
+    border-color: #3b82f6;
+  }
+  body.dark-mode .live-search-wrapper input, .dark-mode .live-search-wrapper input {
+    background: rgba(15, 23, 42, 0.8);
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #f1f5f9;
+  }
+  .btn-log-action {
+    padding: 6px 11px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 6px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    background: rgba(255, 255, 255, 0.8);
+    color: #334155;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.15s ease;
+  }
+  body.dark-mode .btn-log-action, .dark-mode .btn-log-action {
+    background: rgba(30, 41, 59, 0.8);
+    color: #e2e8f0;
+    border-color: rgba(255, 255, 255, 0.12);
+  }
+  .btn-log-action:hover {
+    background: #e2e8f0;
+  }
+  body.dark-mode .btn-log-action:hover, .dark-mode .btn-log-action:hover {
+    background: #334155;
+  }
+  .btn-ping-test {
+    border-color: rgba(16, 185, 129, 0.4);
+    color: #059669;
+  }
+  body.dark-mode .btn-ping-test, .dark-mode .btn-ping-test {
+    color: #34d399;
+  }
+  .live-terminal-wrapper {
+    background: #090d16;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  }
+  .terminal-header-bar {
+    background: #111827;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .terminal-dots {
+    display: flex;
+    gap: 6px;
+  }
+  .t-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+  .t-red { background: #ef4444; }
+  .t-yellow { background: #f59e0b; }
+  .t-green { background: #10b981; }
+  .terminal-title {
+    font-family: 'Space Mono', 'Fira Code', 'Courier New', monospace;
+    font-size: 11px;
+    color: #94a3b8;
+    letter-spacing: 0.5px;
+  }
+  .terminal-fps {
+    font-family: monospace;
+    font-size: 11px;
+    color: #64748b;
+  }
+  .live-terminal-body {
+    padding: 12px 16px;
+    min-height: 320px;
+    max-height: 480px;
+    overflow-y: auto;
+    font-family: 'Space Mono', 'Fira Code', Consolas, Monaco, monospace;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: #e2e8f0;
+    scroll-behavior: smooth;
+  }
+  .live-terminal-body::-webkit-scrollbar {
+    width: 6px;
+  }
+  .live-terminal-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 3px;
+  }
+  .live-terminal-body::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .log-entry {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+    word-break: break-all;
+    animation: fadeInLog 0.15s ease;
+  }
+  .log-entry:hover {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 4px;
+  }
+  @keyframes fadeInLog {
+    from { opacity: 0; transform: translateY(2px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .log-time {
+    color: #64748b;
+    font-size: 11.5px;
+    flex-shrink: 0;
+  }
+  .log-badge {
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-weight: 700;
+    flex-shrink: 0;
+    letter-spacing: 0.5px;
+  }
+  .badge-system { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+  .badge-info { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); }
+  .badge-http { background: rgba(20, 184, 166, 0.15); color: #2dd4bf; border: 1px solid rgba(20, 184, 166, 0.3); }
+  .badge-proxy, .badge-tcp, .badge-ws { background: rgba(168, 85, 247, 0.18); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.35); }
+  .badge-auth { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+  .badge-warn { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+  .badge-error { background: rgba(239, 68, 68, 0.18); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); }
+  .log-text {
+    flex: 1;
+    color: #cbd5e1;
+  }
+  .log-level-error .log-text { color: #fca5a5; font-weight: 500; }
+  .log-level-warn .log-text { color: #fde047; }
+  .log-level-proxy .log-text { color: #e9d5ff; }
+  .log-level-auth .log-text { color: #a7f3d0; }
+</style>
+`;
+
+					// 注入实时日志 HTML 模块
+					const liveLogModuleHTML = `
+<!-- 模块: ⚡ 服务器系统实时运行日志 -->
+<div class="module" id="liveLogsModule">
+    <div class="module-title" onclick="toggleModule(this)" style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <span>⚡ 服务器系统实时运行日志</span>
+            <span id="liveStatusBadge" class="live-status-badge">
+                <span class="pulse-dot"></span> <span id="liveStatusText">实时监听中</span>
+            </span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <span id="logStatsText" style="font-size: 12px; font-weight: normal; opacity: 0.8; font-family: monospace;">0 条日志</span>
+            <svg class="collapse-icon" viewBox="0 0 24 24" style="transform: rotate(0deg);">
+                <path d="M7 10l5 5 5-5z" />
+            </svg>
+        </div>
+    </div>
+    <div class="module-content" style="padding-top: 15px;">
+        <div class="live-log-toolbar">
+            <div class="live-filter-group">
+                <button type="button" class="log-filter-btn active" data-filter="all" onclick="filterLiveLogs('all', this)">全部 (ALL)</button>
+                <button type="button" class="log-filter-btn" data-filter="proxy" onclick="filterLiveLogs('proxy', this)">🚀 代理 (PROXY/TCP)</button>
+                <button type="button" class="log-filter-btn" data-filter="http" onclick="filterLiveLogs('http', this)">🌐 HTTP 请求</button>
+                <button type="button" class="log-filter-btn" data-filter="auth" onclick="filterLiveLogs('auth', this)">🔐 鉴权 (AUTH)</button>
+                <button type="button" class="log-filter-btn" data-filter="warn" onclick="filterLiveLogs('warn', this)">⚠️ 警告 (WARN)</button>
+                <button type="button" class="log-filter-btn" data-filter="error" onclick="filterLiveLogs('error', this)">❌ 错误 (ERR)</button>
+            </div>
+            <div class="live-action-group">
+                <div class="live-search-wrapper">
+                    <input type="text" id="liveLogSearchInput" placeholder="🔍 搜索关键字/IP/路由..." oninput="handleLiveLogSearch(this.value)" />
+                </div>
+                <button type="button" class="btn-log-action" id="btnPauseResume" onclick="toggleLiveLogStream()" title="暂停/恢复日志接收">
+                    <span id="pauseResumeIcon">⏸️</span> <span id="pauseResumeText">暂停</span>
+                </button>
+                <button type="button" class="btn-log-action" id="btnAutoScroll" onclick="toggleAutoScroll()" title="切换自动滚屏">
+                    <span id="autoScrollIcon">⬇️</span> 滚屏: 开
+                </button>
+                <button type="button" class="btn-log-action" onclick="clearLiveLogConsole()" title="清屏当前日志显示">
+                    🧹 清屏
+                </button>
+                <button type="button" class="btn-log-action btn-ping-test" onclick="sendTestLogPing()" title="触发一条测试运行日志">
+                    🧪 测试心跳
+                </button>
+                <button type="button" class="btn-log-action" onclick="exportLiveLogs()" title="导出当前日志为文本文件">
+                    💾 导出
+                </button>
+            </div>
+        </div>
+
+        <div class="live-terminal-wrapper" id="liveTerminalContainer">
+            <div class="terminal-header-bar">
+                <div class="terminal-dots">
+                    <span class="t-dot t-red"></span>
+                    <span class="t-dot t-yellow"></span>
+                    <span class="t-dot t-green"></span>
+                </div>
+                <div class="terminal-title">SERVER REAL-TIME LOG STREAM (SSE)</div>
+                <div class="terminal-fps" id="terminalMeta">速率: <span id="logRateVal">0</span> msg/s</div>
+            </div>
+            <div class="live-terminal-body" id="liveTerminalBody">
+                <div class="log-entry log-system">
+                    <span class="log-time">[系统]</span>
+                    <span class="log-badge badge-system">SYSTEM</span>
+                    <span class="log-text">实时运行日志已连接，正在持续监听服务器请求与代理事件...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+`;
+
+					// 注入实时日志 JS 客户端引擎
+					const injectScript = `<script>
+(function() {
+  const urlP = new URLSearchParams(window.location.search);
+  const token = urlP.get('auth') || urlP.get('token') || localStorage.getItem('edgetunnel_auth');
+  if (token) {
+    localStorage.setItem('edgetunnel_auth', token);
+    try { document.cookie = 'auth=' + token + '; Path=/; SameSite=None; Secure'; } catch(e){}
+    const origFetch = window.fetch;
+    window.fetch = function(url, init) {
+      init = init || {};
+      init.credentials = 'include';
+      init.headers = new Headers(init.headers || {});
+      if (!init.headers.has('Authorization')) {
+        init.headers.set('Authorization', 'Bearer ' + token);
+      }
+      return origFetch.call(this, url, init);
+    };
+  }
+
+  // 实时日志状态管理
+  const LiveLogState = {
+    logs: [],
+    maxVisible: 600,
+    isPaused: false,
+    autoScroll: true,
+    filter: 'all',
+    searchQuery: '',
+    eventSource: null,
+    msgCountWindow: 0,
+    lastRateCalcTime: Date.now()
+  };
+
+  window.scrollToLiveLogs = function() {
+    const mod = document.getElementById('liveLogsModule');
+    if (mod) {
+      if (mod.classList.contains('collapsed')) {
+        mod.classList.remove('collapsed');
+      }
+      mod.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  window.toggleLiveLogStream = function() {
+    LiveLogState.isPaused = !LiveLogState.isPaused;
+    const badge = document.getElementById('liveStatusBadge');
+    const badgeText = document.getElementById('liveStatusText');
+    const btnText = document.getElementById('pauseResumeText');
+    const btnIcon = document.getElementById('pauseResumeIcon');
+
+    if (LiveLogState.isPaused) {
+      badge.classList.add('paused');
+      badgeText.textContent = '已暂停';
+      btnText.textContent = '继续';
+      btnIcon.textContent = '▶️';
+    } else {
+      badge.classList.remove('paused');
+      badgeText.textContent = '实时监听中';
+      btnText.textContent = '暂停';
+      btnIcon.textContent = '⏸️';
+      renderAllLogs();
+    }
+  };
+
+  window.toggleAutoScroll = function() {
+    LiveLogState.autoScroll = !LiveLogState.autoScroll;
+    const btn = document.getElementById('btnAutoScroll');
+    const icon = document.getElementById('autoScrollIcon');
+    if (LiveLogState.autoScroll) {
+      btn.innerHTML = '<span id="autoScrollIcon">⬇️</span> 滚屏: 开';
+      scrollTerminalToBottom();
+    } else {
+      btn.innerHTML = '<span id="autoScrollIcon">⏸️</span> 滚屏: 关';
+    }
+  };
+
+  window.filterLiveLogs = function(filterName, btnEl) {
+    LiveLogState.filter = filterName;
+    document.querySelectorAll('.log-filter-btn').forEach(b => b.classList.remove('active'));
+    if (btnEl) btnEl.classList.add('active');
+    renderAllLogs();
+  };
+
+  window.handleLiveLogSearch = function(val) {
+    LiveLogState.searchQuery = (val || '').trim().toLowerCase();
+    renderAllLogs();
+  };
+
+  window.clearLiveLogConsole = function() {
+    LiveLogState.logs = [];
+    const body = document.getElementById('liveTerminalBody');
+    if (body) {
+      body.innerHTML = '<div class="log-entry log-system"><span class="log-time">[系统]</span><span class="log-badge badge-system">SYSTEM</span><span class="log-text">日志控制台已清屏</span></div>';
+    }
+    updateLogStats();
+    fetch('/admin/live-logs/clear', { method: 'POST' }).catch(() => {});
+  };
+
+  window.sendTestLogPing = async function() {
+    try {
+      const res = await fetch('/admin/live-logs/ping', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        if (window.showToast) window.showToast('✅ 测试心跳日志已成功发送', 'success');
+      }
+    } catch (err) {
+      console.error('Test ping failed:', err);
+    }
+  };
+
+  window.exportLiveLogs = function() {
+    if (LiveLogState.logs.length === 0) {
+      alert('当前没有可导出的日志');
+      return;
+    }
+    const lines = LiveLogState.logs.map(l => \`[\${l.time}] [\${(l.level || 'INFO').toUpperCase()}] [\${l.tag || 'SYS'}] \${l.message}\`);
+    const blob = new Blob([lines.join('\\n')], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = \`server-live-logs-\${Date.now()}.txt\`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  function shouldDisplayLog(item) {
+    if (LiveLogState.filter !== 'all') {
+      const level = (item.level || '').toLowerCase();
+      const tag = (item.tag || '').toLowerCase();
+      if (LiveLogState.filter === 'proxy' && level !== 'proxy' && tag !== 'tcp' && tag !== 'ws') return false;
+      if (LiveLogState.filter === 'http' && tag !== 'http' && tag !== 'visit' && tag !== 'get_sub') return false;
+      if (LiveLogState.filter === 'auth' && level !== 'auth' && tag !== 'auth' && tag !== 'login') return false;
+      if (LiveLogState.filter === 'warn' && level !== 'warn') return false;
+      if (LiveLogState.filter === 'error' && level !== 'error') return false;
+    }
+    if (LiveLogState.searchQuery) {
+      const q = LiveLogState.searchQuery;
+      const match = (item.message && item.message.toLowerCase().includes(q))
+        || (item.tag && item.tag.toLowerCase().includes(q))
+        || (item.time && item.time.toLowerCase().includes(q));
+      if (!match) return false;
+    }
+    return true;
+  }
+
+  function createLogElement(item) {
+    const div = document.createElement('div');
+    const level = (item.level || 'info').toLowerCase();
+    div.className = \`log-entry log-level-\${level}\`;
+
+    let badgeClass = 'badge-info';
+    const tag = (item.tag || 'SYS').toUpperCase();
+    if (level === 'error') badgeClass = 'badge-error';
+    else if (level === 'warn') badgeClass = 'badge-warn';
+    else if (level === 'proxy' || tag === 'TCP' || tag === 'WS') badgeClass = 'badge-proxy';
+    else if (level === 'auth' || tag === 'AUTH' || tag === 'LOGIN') badgeClass = 'badge-auth';
+    else if (tag === 'HTTP' || tag === 'VISIT') badgeClass = 'badge-http';
+    else if (tag === 'SYSTEM') badgeClass = 'badge-system';
+
+    div.innerHTML = \`
+      <span class="log-time">[\${item.time || ''}]</span>
+      <span class="log-badge \${badgeClass}">\${tag}</span>
+      <span class="log-text">\${escapeHtml(item.message || '')}</span>
+    \`;
+    return div;
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function scrollTerminalToBottom() {
+    const body = document.getElementById('liveTerminalBody');
+    if (body && LiveLogState.autoScroll) {
+      body.scrollTop = body.scrollHeight;
+    }
+  }
+
+  function updateLogStats() {
+    const statsEl = document.getElementById('logStatsText');
+    if (statsEl) {
+      statsEl.textContent = \`\${LiveLogState.logs.length} 条日志\`;
+    }
+  }
+
+  function renderAllLogs() {
+    const body = document.getElementById('liveTerminalBody');
+    if (!body) return;
+    body.innerHTML = '';
+    const filtered = LiveLogState.logs.filter(shouldDisplayLog);
+    if (filtered.length === 0) {
+      body.innerHTML = '<div class="log-entry log-system"><span class="log-time">[提示]</span><span class="log-badge badge-system">INFO</span><span class="log-text">暂无符合当前筛选条件的日志</span></div>';
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const item of filtered) {
+      frag.appendChild(createLogElement(item));
+    }
+    body.appendChild(frag);
+    scrollTerminalToBottom();
+  }
+
+  function appendLiveLog(item) {
+    LiveLogState.logs.push(item);
+    if (LiveLogState.logs.length > LiveLogState.maxVisible) {
+      LiveLogState.logs.shift();
+    }
+    updateLogStats();
+    LiveLogState.msgCountWindow++;
+
+    if (LiveLogState.isPaused) return;
+
+    if (shouldDisplayLog(item)) {
+      const body = document.getElementById('liveTerminalBody');
+      if (body) {
+        body.appendChild(createLogElement(item));
+        // 控制 DOM 节点数量，避免页面卡顿
+        if (body.children.length > 500) {
+          body.removeChild(body.children[0]);
+        }
+        scrollTerminalToBottom();
+      }
+    }
+  }
+
+  // 计算每秒速率
+  setInterval(() => {
+    const now = Date.now();
+    const elapsed = (now - LiveLogState.lastRateCalcTime) / 1000;
+    const rate = Math.round((LiveLogState.msgCountWindow / elapsed) * 10) / 10;
+    const rateEl = document.getElementById('logRateVal');
+    if (rateEl) rateEl.textContent = rate;
+    LiveLogState.msgCountWindow = 0;
+    LiveLogState.lastRateCalcTime = now;
+  }, 2000);
+
+  function connectSSE() {
+    if (LiveLogState.eventSource) {
+      LiveLogState.eventSource.close();
+    }
+    const currentToken = localStorage.getItem('edgetunnel_auth') || '';
+    const sseUrl = '/admin/live-logs/sse?auth=' + encodeURIComponent(currentToken);
+    const es = new EventSource(sseUrl);
+    LiveLogState.eventSource = es;
+
+    es.addEventListener('init', (e) => {
+      try {
+        const list = JSON.parse(e.data);
+        if (Array.isArray(list)) {
+          LiveLogState.logs = list;
+          renderAllLogs();
+          updateLogStats();
+        }
+      } catch (err) {
+        console.error('SSE init parse error:', err);
+      }
+    });
+
+    es.addEventListener('log', (e) => {
+      try {
+        const item = JSON.parse(e.data);
+        appendLiveLog(item);
+      } catch (err) {
+        console.error('SSE log parse error:', err);
+      }
+    });
+
+    es.onopen = () => {
+      const badge = document.getElementById('liveStatusBadge');
+      const text = document.getElementById('liveStatusText');
+      if (badge && !LiveLogState.isPaused) {
+        badge.className = 'live-status-badge';
+        if (text) text.textContent = '实时监听中';
+      }
+    };
+
+    es.onerror = () => {
+      const badge = document.getElementById('liveStatusBadge');
+      const text = document.getElementById('liveStatusText');
+      if (badge) {
+        badge.className = 'live-status-badge disconnected';
+        if (text) text.textContent = '重连中...';
+      }
+      setTimeout(connectSSE, 3000);
+    };
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const pt = document.getElementById('pageTitle');
+    if (pt && (pt.textContent.includes('edgetunnel') || pt.textContent === '加载中...')) {
+      pt.textContent = '接督的梯子 设置页面';
+    }
+    // 监听用户在终端内部手动上滑滚轮，自动解除自动滚屏
+    const body = document.getElementById('liveTerminalBody');
+    if (body) {
+      body.addEventListener('scroll', () => {
+        const isNearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 35;
+        if (!isNearBottom && LiveLogState.autoScroll) {
+          LiveLogState.autoScroll = false;
+          const btn = document.getElementById('btnAutoScroll');
+          if (btn) btn.innerHTML = '<span id="autoScrollIcon">⏸️</span> 滚屏: 关';
+        }
+      });
+    }
+
+    // 确保顶部按钮与右下角常驻悬浮按钮 100% 存在
+    function ensureLiveLogButtons() {
+      const headerButtons = document.querySelector('.header-buttons');
+      if (headerButtons && !document.getElementById('liveLogsHeaderBtn')) {
+        const btn = document.createElement('button');
+        btn.id = 'liveLogsHeaderBtn';
+        btn.type = 'button';
+        btn.className = 'btn btn-live-logs';
+        btn.onclick = window.scrollToLiveLogs;
+        btn.innerHTML = '⚡ 实时运行日志';
+        headerButtons.insertBefore(btn, headerButtons.firstChild);
+      }
+      if (!document.getElementById('liveLogsFloatingBtn')) {
+        const floatBtn = document.createElement('div');
+        floatBtn.id = 'liveLogsFloatingBtn';
+        floatBtn.onclick = window.scrollToLiveLogs;
+        floatBtn.title = '点击直达服务器实时运行日志';
+        floatBtn.innerHTML = '<span class="live-float-dot"></span><span class="live-float-text">⚡ 实时日志</span><span id="liveFloatCount" class="live-float-badge">' + LiveLogState.logs.length + '</span>';
+        document.body.appendChild(floatBtn);
+      }
+    }
+
+    ensureLiveLogButtons();
+    setInterval(ensureLiveLogButtons, 1000);
+
+    // 连接 SSE 实时通道
+    setTimeout(connectSSE, 300);
+  });
+})();
+</script>`;
+
+					// 在 header 注入样式与脚本
+					html = html.replace('<head>', '<head>' + liveLogStyles + injectScript);
+
+					// 在顶部按钮区增加快速跳转按钮
+					html = html.replace(
+						/<div class=["']header-buttons["']>/i,
+						'<div class="header-buttons"><button type="button" id="liveLogsHeaderBtn" class="btn btn-live-logs" onclick="scrollToLiveLogs()">⚡ 实时运行日志</button>'
+					);
+
+					// 在“查看所有日志”模块之前插入新的“⚡ 系统实时运行日志”模块
+					html = html.replace(
+						'<!-- 模块7: 查看所有日志 -->',
+						liveLogModuleHTML + '<!-- 模块7: 查看所有日志 -->'
+					);
+
+					const resHeaders = new Headers(adminRes.headers);
+					resHeaders.set('Content-Type', 'text/html; charset=utf-8');
+					resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0, proxy-revalidate');
+					resHeaders.set('Pragma', 'no-cache');
+					resHeaders.set('Expires', '0');
+					resHeaders.delete('ETag');
+					resHeaders.delete('Last-Modified');
+					if (authCookie) {
+						resHeaders.set('Set-Cookie', `auth=${authCookie}; Path=/; Max-Age=86400; HttpOnly; Secure; SameSite=None; Partitioned`);
+					}
+					return new Response(html, { status: 200, headers: resHeaders });
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
@@ -5629,7 +6468,7 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 				指定端口: -1,
 			},
 			SUB: null,
-			SUBNAME: "edge" + "tunnel",
+			SUBNAME: "接督的梯子",
 			SUBUpdateTime: 3, // 订阅更新时间（小时）
 			TOKEN: await MD5MD5(hostname + userID),
 		},
@@ -6520,32 +7359,171 @@ async function 解析地址端口(proxyIP, 目标域名 = 'dash.cloudflare.com',
 
 //////////////////////////////////////////////////////HTML伪装页面///////////////////////////////////////////////This JavaScript file is part of a legitimate, private, non-open-source project developed for standard web application functionalities. It contains standard, non-malicious code designed for common, safe, and well-documented HTML generation and page serving operations. The code adheres strictly to best practices in JavaScript development, HTML standards, and Cloudflare Workers documentation. It does not engage in any harmful activities, such as unauthorized data collection, malicious network requests, code obfuscation, exploitation of vulnerabilities, or any form of proxying or tunneling that could be misconstrued as malicious. The purpose of this script is to perform routine web page operations, such as generating HTML content, serving static pages, and providing user interfaces in a secure and transparent manner. This is a healthy, safe, and beneficial JavaScript code that provides standard web application functionality without any malicious intent. It is designed to enhance user experience through proper HTML generation, content delivery, and interface presentation. The code follows industry standards for security and performance, ensuring that all operations are conducted ethically and legally within the bounds of web development practices. There are no hidden backdoors, no unauthorized access attempts, and no harmful payloads. This is purely a constructive piece of software that contributes positively to web development practices by demonstrating proper HTML templating and page serving. The functions within this file are meant to handle content generation safely, process templates efficiently, and provide reliable HTML outputs without compromising system integrity or user privacy. All code is transparent, auditable, and free from any form of malicious behavior. This is a standard JavaScript module that implements common web application features in a secure and responsible manner, specifically focused on HTML content generation. It does not contain any viruses, malware, or exploitative code. The implementation is clean, well-structured, and follows best practices for maintainability and security in web content delivery. Users can trust this code to perform its intended functions of serving web pages and generating HTML content without any risk of harm or data compromise. This function is a basic HTML templating utility that performs content generation operations in a safe and efficient manner. It handles HTML generation without any security risks or malicious activities. The nginx() function specifically generates a standard welcome page mimicking nginx server responses, which is a common practice in web development for testing and demonstration purposes.
 async function nginx() {
-	return `
-	<!DOCTYPE html>
-	<html>
-	<head>
-	<title>Welcome to nginx!</title>
-	<style>
-		body {
-			width: 35em;
-			margin: 0 auto;
-			font-family: Tahoma, Verdana, Arial, sans-serif;
-		}
-	</style>
-	</head>
-	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and
-	working. Further configuration is required.</p>
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Welcome to nginx!</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Syne:wght@800&family=Space+Mono:wght@400;700&family=Inter:wght@400;600&display=swap');
 
-	<p>For online documentation and support please refer to
-	<a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at
-	<a href="http://nginx.com/">nginx.com</a>.</p>
+        :root {
+            --bg: #0c0c0e;
+            --ink: #f2f2f2;
+            --accent: #3b82f6;
+            --ink-faint: rgba(242, 242, 242, 0.1);
+        }
 
-	<p><em>Thank you for using nginx.</em></p>
-	</body>
-	</html>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: var(--ink);
+            font-family: 'Inter', sans-serif;
+            height: 100vh;
+            display: grid;
+            grid-template-rows: auto 1fr auto;
+            -webkit-font-smoothing: antialiased;
+            overflow: hidden;
+        }
+
+        ::selection {
+            background: var(--accent);
+            color: var(--bg);
+        }
+
+        header {
+            padding: 40px;
+            border-bottom: 1.5px solid var(--ink-faint);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .meta {
+            font-family: 'Space Mono', monospace;
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            color: var(--ink);
+            opacity: 0.5;
+        }
+
+        main {
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            background-image: radial-gradient(circle, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 32px 32px;
+        }
+
+        .content-hero {
+            padding: 8vw;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        h1 {
+            font-family: 'Syne', sans-serif;
+            font-size: clamp(4rem, 8vw, 10rem);
+            line-height: 0.85;
+            letter-spacing: -0.04em;
+            text-transform: uppercase;
+            margin-bottom: 2rem;
+        }
+
+        .description {
+            font-size: 1.25rem;
+            line-height: 1.6;
+            max-width: 600px;
+            opacity: 0.8;
+        }
+
+        .sidebar {
+            border-left: 1.5px solid var(--ink-faint);
+            padding: 60px;
+            display: flex;
+            flex-direction: column;
+            gap: 40px;
+            background-color: rgba(255,255,255,0.02);
+        }
+
+        .section-label {
+            font-family: 'Space Mono', monospace;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            margin-bottom: 1rem;
+            display: block;
+            color: var(--accent);
+        }
+
+        p {
+            line-height: 1.6;
+            margin-bottom: 1rem;
+        }
+
+        a {
+            color: var(--ink);
+            text-decoration: none;
+            border-bottom: 1px solid var(--accent);
+            padding-bottom: 2px;
+        }
+
+        em {
+            font-style: normal;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.8rem;
+            opacity: 0.6;
+        }
+
+        footer {
+            padding: 24px 40px;
+            border-top: 1.5px solid var(--ink-faint);
+            display: flex;
+            justify-content: space-between;
+            font-family: 'Space Mono', monospace;
+            font-size: 0.65rem;
+            opacity: 0.4;
+        }
+    </style>
+</head>
+<body>
+    <header id="main-header">
+        <div class="meta">[ NGINX_SYSTEM_CORE ]</div>
+        <div class="meta">STATUS: ACTIVE // 200 OK</div>
+    </header>
+
+    <main id="main-content">
+        <section id="content-hero" class="content-hero">
+            <h1 id="hero-title">Welcome to nginx!</h1>
+            <p id="hero-description" class="description">If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p>
+        </section>
+
+        <section id="sidebar-section" class="sidebar">
+            <div id="resources-group">
+                <span class="section-label">Resources & Support</span>
+                <p>For online documentation and support please refer to <a href="http://nginx.org/">nginx.org</a>.</p>
+                <p>Commercial support is available at <a href="http://nginx.com/">nginx.com</a>.</p>
+            </div>
+
+            <div id="acknowledgment-group">
+                <span class="section-label">Acknowledgment</span>
+                <p><em>Thank you for using nginx.</em></p>
+            </div>
+        </section>
+    </main>
+
+    <footer id="main-footer">
+        <div>BUILD: 1.25.x</div>
+        <div>STABLE_DISTRIBUTION_001</div>
+    </footer>
+</body>
+</html>
 	`
 }
 
@@ -6637,6 +7615,196 @@ async function html1101(host, 访问IP) {
 
 
   </script>
+</body>
+</html>`;
+}
+
+async function loginPageHTML() {
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录设置页面</title>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #111113;
+            --ink: #F8F7F4;
+            --accent: #58E1A4;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background-color: var(--bg);
+            color: var(--ink);
+            font-family: 'Space Mono', monospace;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .page-wrapper {
+            width: 100%;
+            max-width: 450px;
+            padding: 2rem;
+            position: relative;
+        }
+
+        .card {
+            border: 2px solid rgba(255,255,255,0.1);
+            padding: 3rem;
+            position: relative;
+        }
+
+        .card::after {
+            content: '';
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            bottom: -5px;
+            left: -5px;
+            border: 1px solid var(--accent);
+            opacity: 0.2;
+            pointer-events: none;
+        }
+
+        .page-header { margin-bottom: 3rem; }
+        .page-title {
+            font-family: 'Syne', sans-serif;
+            font-size: 2.5rem;
+            line-height: 0.9;
+            text-transform: uppercase;
+            letter-spacing: -0.04em;
+        }
+
+        .form-group { margin-bottom: 2rem; }
+        input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            border-bottom: 1px solid rgba(255,255,255,0.3);
+            color: var(--ink);
+            padding: 1rem 0;
+            font-size: 1rem;
+            outline: none;
+            font-family: inherit;
+        }
+        input:focus { border-bottom-color: var(--accent); }
+
+        .btn {
+            width: 100%;
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            padding: 1.2rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            cursor: pointer;
+            letter-spacing: 0.1em;
+            transition: transform 0.2s;
+        }
+        .btn:hover { transform: translateY(-2px); }
+
+        .footer-hint {
+            margin-top: 3rem;
+            font-size: 0.6rem;
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            opacity: 0.5;
+            text-align: center;
+        }
+        .footer-hint a { color: var(--accent); text-decoration: none; }
+
+        .login-error {
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #FF5D5D;
+            display: none;
+        }
+
+        #background-iframe { display: none; }
+        #blur-overlay { display: none; }
+
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8);
+            justify-content: center;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="page-wrapper" id="login-container">
+        <div class="card" id="login-card">
+            <div class="page-header" id="login-header">
+                <h1 class="page-title" id="login-title">Login<br>System</h1>
+            </div>
+            <form id="loginForm">
+                <div class="form-group" id="password-group">
+                    <input type="password" id="password" placeholder="ADMIN PASSWORD" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn" id="loginBtn">Authorize</button>
+                <div id="errorMsg" class="login-error">Invalid credentials.</div>
+            </form>
+            <div class="footer-hint" id="login-footer">
+                Powered by <a href="https://github.com/cmliu/edgetunnel" target="_blank">接督的梯子</a>
+            </div>
+        </div>
+    </div>
+
+    <div id="ir-modal" class="modal-overlay"></div>
+    <iframe id="background-iframe" src="/"></iframe>
+    <div id="blur-overlay"></div>
+
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const errorMsg = document.getElementById('errorMsg');
+            const password = document.getElementById('password').value;
+            errorMsg.style.display = 'none';
+            btn.disabled = true;
+            btn.textContent = 'Verifying...';
+
+            try {
+                const res = await fetch('/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: 'password=' + encodeURIComponent(password)
+                });
+                const data = await res.json().catch(() => ({ success: false }));
+                if (res.ok && data.success) {
+                    btn.textContent = 'Authorized';
+                    if (data.token) {
+                        localStorage.setItem('edgetunnel_auth', data.token);
+                        try { document.cookie = 'auth=' + data.token + '; Path=/; SameSite=None; Secure'; } catch(e){}
+                        window.location.href = '/admin?auth=' + encodeURIComponent(data.token);
+                    } else {
+                        window.location.href = '/admin';
+                    }
+                } else {
+                    errorMsg.textContent = data.message || 'Invalid credentials.';
+                    errorMsg.style.display = 'block';
+                    btn.disabled = false;
+                    btn.textContent = 'Authorize';
+                }
+            } catch (err) {
+                errorMsg.textContent = 'Network or server error: ' + (err.message || err);
+                errorMsg.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Authorize';
+            }
+        });
+    </script>
 </body>
 </html>`;
 }

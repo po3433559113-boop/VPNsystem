@@ -1,0 +1,19 @@
+{
+  "name": "edgetunnel",
+  "version": "2.1.0",
+  "type": "module",
+  "description": "edgetunnel edge computing tunnel and subscription management panel",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "build": "node -e \"console.log('Build complete')\""
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.10"
+  }
+}
