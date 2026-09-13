@@ -420,14 +420,24 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
       return;
     }
 
-    // H. Root view
+    // H. Logout Endpoint
+    if (pathname === '/logout') {
+      nodeRes.writeHead(302, {
+        'Location': '/login',
+        'Set-Cookie': 'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax'
+      });
+      nodeRes.end();
+      return;
+    }
+
+    // I. Root view
     if (pathname === '/') {
       nodeRes.writeHead(302, { 'Location': '/admin' });
       nodeRes.end();
       return;
     }
 
-    // I. Forward other requests to Cloudflare Worker logic (_worker.js)
+    // J. Forward other requests to Cloudflare Worker logic (_worker.js)
     const headers = new Headers();
     for (const [key, val] of Object.entries(nodeReq.headers)) {
       if (val === undefined) continue;

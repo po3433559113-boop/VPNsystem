@@ -713,10 +713,10 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
         刷新
       </button>
 
-      <a href="/logout" class="btn-header" style="color: #f87171;">
+      <button class="btn-header" onclick="handleLogout()" style="color: #f87171; border-color: rgba(239, 68, 68, 0.35);">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-        退出
-      </a>
+        退出登录
+      </button>
     </div>
   </header>
 
@@ -1718,6 +1718,14 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
       } catch (err) {
         container.innerText = '读取失败: ' + err.message;
       }
+    }
+
+    async function handleLogout() {
+      try {
+        document.cookie = 'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT;';
+        await fetch('/logout');
+      } catch (_) {}
+      window.location.href = '/login';
     }
 
     // On Load
