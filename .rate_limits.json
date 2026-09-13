@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "uploadLimitKBps": 512,
+  "downloadLimitKBps": 512,
+  "mode": "balanced",
+  "burstKB": 32
+}

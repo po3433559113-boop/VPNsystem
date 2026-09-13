@@ -76,78 +76,22 @@ globalThis.WebSocketPair = class WebSocketPair {
   }
 };
 
-// 3. Live Log Manager for Real-Time Server Event Broadcasting
-class LiveLogManager {
-  constructor(maxLogs = 800) {
-    this.maxLogs = maxLogs;
-    this.logs = [];
-    this.counter = 0;
-    this.subscribers = new Set();
-  }
+// 5. Import the Cloudflare Worker module and traffic engine
+import { trafficEngine } from './trafficEngine.js';
+import { renderAdminHtml } from './adminHtml.js';
+import { renderLoginHtml, renderNoAdminHtml } from './loginHtml.js';
+const { default: worker } = await import('./_worker.js');
 
-  add(level, tag, message, details = null) {
-    const now = new Date();
-    const pad = (n, len = 2) => String(n).padStart(len, '0');
-    const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`;
-
-    const logItem = {
-      id: ++this.counter,
-      time: timeStr,
-      timestamp: Date.now(),
-      level: String(level || 'info').toLowerCase(),
-      tag: String(tag || 'SYSTEM').toUpperCase(),
-      message: typeof message === 'object' ? JSON.stringify(message) : String(message),
-      details: details ? (typeof details === 'object' ? details : { text: String(details) }) : undefined
-    };
-
-    this.logs.push(logItem);
-    if (this.logs.length > this.maxLogs) {
-      this.logs.shift();
-    }
-
-    const sseChunk = `event: log\ndata: ${JSON.stringify(logItem)}\n\n`;
-    for (const sub of this.subscribers) {
-      try {
-        sub.enqueue(new TextEncoder().encode(sseChunk));
-      } catch (_) {
-        this.subscribers.delete(sub);
-      }
-    }
-
-    return logItem;
-  }
-
-  getRecent(count = 100) {
-    return this.logs.slice(-count);
-  }
-
-  clear() {
-    this.logs = [];
-    return this.add('system', 'SYSTEM', '实时运行日志已清空 (Live logs cleared by admin)');
-  }
-
-  subscribe(controller) {
-    this.subscribers.add(controller);
-    return () => {
-      this.subscribers.delete(controller);
-    };
-  }
+// MD5 Helper
+function md5(str) {
+  return crypto.createHash('md5').update(str).digest('hex');
 }
 
-const liveLogger = new LiveLogManager();
-globalThis.__liveLogger = liveLogger;
-liveLogger.add('system', 'SYSTEM', '服务核心引擎已启动 (Node.js 22 Runtime Bridge Online)');
-
-// 4. Node TCP Socket connector for Cloudflare Workers socket connect
-let socketCounter = 0;
+// 3. Node TCP Socket connector for Cloudflare Workers socket connect (with Traffic & Rate Limit integration)
 function createNodeSocket(options) {
-  const socketId = ++socketCounter;
   const { hostname, port } = options;
-  liveLogger.add('proxy', 'TCP', `[Socket #${socketId}] 正在建立外发 TCP 代理连接 -> ${hostname}:${port}`);
-  
   const rawSocket = net.connect({ host: hostname, port: Number(port) });
-  let bytesReceived = 0;
-  let bytesSent = 0;
+  trafficEngine.addActiveConnection();
 
   let resolveOpened, rejectOpened;
   const opened = new Promise((resolve, reject) => {
@@ -160,43 +104,50 @@ function createNodeSocket(options) {
     resolveClosed = resolve;
   });
 
-  rawSocket.on('connect', () => {
-    liveLogger.add('proxy', 'TCP', `[Socket #${socketId}] TCP 代理已连通: ${hostname}:${port}`);
-    resolveOpened();
-  });
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (!cleanedUp) {
+      cleanedUp = true;
+      trafficEngine.removeActiveConnection();
+    }
+  };
 
+  rawSocket.on('connect', () => resolveOpened());
   rawSocket.on('error', (err) => {
-    liveLogger.add('error', 'TCP', `[Socket #${socketId}] TCP 代理异常: ${err?.message || err}`);
+    cleanup();
     rejectOpened(err);
     resolveClosed();
   });
-
   rawSocket.on('close', () => {
-    liveLogger.add('proxy', 'TCP', `[Socket #${socketId}] TCP 代理连接关闭 (入: ${bytesReceived}B / 出: ${bytesSent}B)`);
+    cleanup();
     resolveClosed();
   });
 
   const readable = new ReadableStream({
     start(controller) {
-      rawSocket.on('data', (chunk) => {
-        bytesReceived += chunk.length;
-        controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+      rawSocket.on('data', async (chunk) => {
+        const u8 = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        await trafficEngine.throttleDownload(u8.byteLength);
+        controller.enqueue(u8);
       });
       rawSocket.on('end', () => {
+        cleanup();
         try { controller.close(); } catch (_) {}
       });
       rawSocket.on('error', (err) => {
+        cleanup();
         try { controller.error(err); } catch (_) {}
       });
     },
     cancel() {
+      cleanup();
       rawSocket.destroy();
     }
   });
 
   const writable = new WritableStream({
-    write(chunk) {
-      bytesSent += chunk.length;
+    async write(chunk) {
+      await trafficEngine.throttleUpload(chunk.length);
       return new Promise((resolve, reject) => {
         rawSocket.write(Buffer.from(chunk), (err) => {
           if (err) reject(err);
@@ -205,9 +156,11 @@ function createNodeSocket(options) {
       });
     },
     close() {
+      cleanup();
       rawSocket.end();
     },
     abort() {
+      cleanup();
       rawSocket.destroy();
     }
   });
@@ -218,12 +171,13 @@ function createNodeSocket(options) {
     opened,
     closed,
     close() {
+      cleanup();
       rawSocket.destroy();
     }
   };
 }
 
-// 5. In-Memory and File-Backed KV Store
+// 4. In-Memory and File-Backed KV Store
 const KV_FILE = path.join(process.cwd(), '.kv_store.json');
 let kvData = {};
 try {
@@ -259,9 +213,6 @@ const KV = {
   }
 };
 
-// 5. Import the Cloudflare Worker module
-const { default: worker } = await import('./_worker.js');
-
 const PORT = 3000;
 const HOST = '0.0.0.0';
 
@@ -273,12 +224,210 @@ const STRIP_RESPONSE_HEADERS = new Set([
   'keep-alive'
 ]);
 
+// Helper for checking admin authentication
+function checkAuth(req, adminPass, key) {
+  const cookies = req.headers.cookie || '';
+  const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1]?.trim();
+  const ua = req.headers['user-agent'] || 'null';
+  const expectedHash = md5(md5(ua + key + adminPass));
+  return authCookie === expectedHash;
+}
+
 // 6. Build the HTTP & WebSocket Server
 const server = http.createServer(async (nodeReq, nodeRes) => {
   try {
     const hostHeader = nodeReq.headers.host || `localhost:${PORT}`;
     const url = new URL(nodeReq.url || '/', `https://${hostHeader}`);
+    const pathname = url.pathname.replace(/\/$/, '') || '/';
+    const adminPass = process.env.ADMIN || process.env.admin || process.env.PASSWORD || process.env.password || process.env.pswd || process.env.TOKEN || process.env.KEY || process.env.UUID || process.env.uuid;
+    const secretKey = process.env.KEY || '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改';
+    const ua = nodeReq.headers['user-agent'] || 'null';
 
+    // A. Real-time Speed Telemetry Stream (SSE)
+    if (pathname === '/admin/speed_stream') {
+      if (!adminPass || !checkAuth(nodeReq, adminPass, secretKey)) {
+        nodeRes.statusCode = 401;
+        nodeRes.end('Unauthorized');
+        return;
+      }
+      nodeRes.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+      });
+      nodeRes.write(`data: ${JSON.stringify(trafficEngine.getStats())}\n\n`);
+      trafficEngine.addSubscriber(nodeRes);
+      nodeReq.on('close', () => {
+        trafficEngine.removeSubscriber(nodeRes);
+      });
+      return;
+    }
+
+    // B. Real-time Speed Statistics JSON API
+    if (pathname === '/admin/speed_stats') {
+      nodeRes.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      nodeRes.end(JSON.stringify(trafficEngine.getStats()));
+      return;
+    }
+
+    // C. Update Rate Limits API
+    if (pathname === '/admin/speed/limit' && nodeReq.method === 'POST') {
+      let bodyStr = '';
+      nodeReq.on('data', chunk => { bodyStr += chunk; });
+      nodeReq.on('end', async () => {
+        try {
+          const payload = JSON.parse(bodyStr || '{}');
+          const updated = trafficEngine.updateLimits(payload);
+          await KV.put('rate_limits.json', JSON.stringify(updated, null, 2));
+          nodeRes.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          nodeRes.end(JSON.stringify({ success: true, rateLimits: updated }));
+        } catch (e) {
+          nodeRes.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          nodeRes.end(JSON.stringify({ success: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    // D. Speed Test Sandbox Endpoints
+    if (pathname === '/admin/speedtest/ping') {
+      nodeRes.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      nodeRes.end(JSON.stringify({ pong: Date.now() }));
+      return;
+    }
+
+    if (pathname === '/admin/speedtest/download') {
+      const sizeMB = Math.min(100, Math.max(1, Number(url.searchParams.get('size')) || 20));
+      const totalBytes = sizeMB * 1024 * 1024;
+      const chunkSize = 64 * 1024; // 64KB chunk
+      const chunk = Buffer.alloc(chunkSize, 0x5a);
+
+      nodeRes.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(totalBytes),
+        'Cache-Control': 'no-store'
+      });
+
+      let sent = 0;
+      while (sent < totalBytes) {
+        const toSend = Math.min(chunkSize, totalBytes - sent);
+        await trafficEngine.throttleDownload(toSend);
+        if (nodeRes.destroyed || nodeRes.writableEnded) break;
+        nodeRes.write(chunk.subarray(0, toSend));
+        sent += toSend;
+      }
+      nodeRes.end();
+      return;
+    }
+
+    if (pathname === '/admin/speedtest/upload' && nodeReq.method === 'POST') {
+      let receivedBytes = 0;
+      nodeReq.on('data', async chunk => {
+        receivedBytes += chunk.length;
+        await trafficEngine.throttleUpload(chunk.length);
+      });
+      nodeReq.on('end', () => {
+        nodeRes.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        nodeRes.end(JSON.stringify({ success: true, receivedBytes }));
+      });
+      return;
+    }
+
+    // E. No ADMIN guide page
+    if (pathname === '/noADMIN') {
+      nodeRes.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      nodeRes.end(renderNoAdminHtml());
+      return;
+    }
+
+    // F. Admin Dashboard View
+    if (pathname === '/admin') {
+      if (!adminPass) {
+        nodeRes.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        nodeRes.end(renderNoAdminHtml());
+        return;
+      }
+
+      const isAuthed = checkAuth(nodeReq, adminPass, secretKey);
+      if (!isAuthed) {
+        nodeRes.writeHead(302, { 'Location': '/login' });
+        nodeRes.end();
+        return;
+      }
+
+      // Fetch or build config
+      let cfg = {};
+      try {
+        const cfgStr = await KV.get('config.json');
+        if (cfgStr) cfg = JSON.parse(cfgStr);
+      } catch (_) {}
+
+      const host = hostHeader.split(':')[0];
+      const userID = process.env.UUID || (cfg.UUID || '4a532356-8208-4338-89f5-e62a2fa809ef');
+
+      const html = renderAdminHtml({
+        host: hostHeader,
+        userID,
+        config: cfg,
+        rateLimits: trafficEngine.rateLimits,
+        stats: trafficEngine.getStats()
+      });
+
+      nodeRes.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      nodeRes.end(html);
+      return;
+    }
+
+    // G. Login Page View
+    if (pathname === '/login') {
+      if (!adminPass) {
+        nodeRes.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        nodeRes.end(renderNoAdminHtml());
+        return;
+      }
+
+      if (checkAuth(nodeReq, adminPass, secretKey) && nodeReq.method === 'GET') {
+        nodeRes.writeHead(302, { 'Location': '/admin' });
+        nodeRes.end();
+        return;
+      }
+
+      if (nodeReq.method === 'POST') {
+        let bodyStr = '';
+        nodeReq.on('data', chunk => { bodyStr += chunk; });
+        nodeReq.on('end', async () => {
+          const params = new URLSearchParams(bodyStr);
+          const inputPwd = params.get('password') || '';
+          const targetPwd = typeof adminPass === 'string' ? adminPass.replace(/[\r\n]/g, '') : adminPass;
+          if (inputPwd === targetPwd) {
+            const authHash = md5(md5(ua + secretKey + adminPass));
+            nodeRes.writeHead(200, {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Set-Cookie': `auth=${authHash}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax`
+            });
+            nodeRes.end(JSON.stringify({ success: true }));
+          } else {
+            nodeRes.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+            nodeRes.end(JSON.stringify({ success: false, error: '密码错误，请确认 Cloudflare 变量与机密中的 ADMIN 文本' }));
+          }
+        });
+        return;
+      }
+
+      nodeRes.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      nodeRes.end(renderLoginHtml());
+      return;
+    }
+
+    // H. Root view
+    if (pathname === '/') {
+      nodeRes.writeHead(302, { 'Location': '/admin' });
+      nodeRes.end();
+      return;
+    }
+
+    // I. Forward other requests to Cloudflare Worker logic (_worker.js)
     const headers = new Headers();
     for (const [key, val] of Object.entries(nodeReq.headers)) {
       if (val === undefined) continue;
@@ -328,8 +477,13 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
     };
 
     const env = {
-      ADMIN: process.env.ADMIN || 'admin',
-      KEY: process.env.KEY || 'edgetunnel',
+      ADMIN: process.env.ADMIN || undefined,
+      admin: process.env.admin || undefined,
+      PASSWORD: process.env.PASSWORD || undefined,
+      password: process.env.password || undefined,
+      pswd: process.env.pswd || undefined,
+      TOKEN: process.env.TOKEN || undefined,
+      KEY: process.env.KEY || undefined,
       UUID: process.env.UUID || undefined,
       HOST: process.env.HOST || undefined,
       DEBUG: process.env.DEBUG || undefined,
@@ -354,7 +508,6 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
       }
     };
 
-    const startTime = Date.now();
     const response = await worker.fetch(request, env, ctx);
 
     nodeRes.statusCode = response.status;
@@ -370,13 +523,6 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
 
     if (cookies.length > 0) {
       nodeRes.setHeader('Set-Cookie', cookies);
-    }
-
-    if (!url.pathname.includes('/live-logs/sse')) {
-      const clientIp = nodeReq.headers['cf-connecting-ip'] || nodeReq.headers['x-forwarded-for'] || nodeReq.socket.remoteAddress || '127.0.0.1';
-      const duration = Date.now() - startTime;
-      const statusLevel = response.status >= 500 ? 'error' : response.status >= 400 ? 'warn' : 'info';
-      liveLogger.add(statusLevel, 'HTTP', `${nodeReq.method || 'GET'} ${url.pathname} - ${response.status} (${duration}ms) [${clientIp}]`);
     }
 
     if (response.body) {
@@ -437,8 +583,13 @@ server.on('upgrade', async (nodeReq, socket, head) => {
     };
 
     const env = {
-      ADMIN: process.env.ADMIN || 'admin',
-      KEY: process.env.KEY || 'edgetunnel',
+      ADMIN: process.env.ADMIN || undefined,
+      admin: process.env.admin || undefined,
+      PASSWORD: process.env.PASSWORD || undefined,
+      password: process.env.password || undefined,
+      pswd: process.env.pswd || undefined,
+      TOKEN: process.env.TOKEN || undefined,
+      KEY: process.env.KEY || undefined,
       UUID: process.env.UUID || undefined,
       HOST: process.env.HOST || undefined,
       DEBUG: process.env.DEBUG || undefined,
@@ -461,29 +612,43 @@ server.on('upgrade', async (nodeReq, socket, head) => {
 
     const workerResp = await worker.fetch(request, env, ctx);
     if (workerResp.status === 101 && workerResp.webSocket) {
-      liveLogger.add('proxy', 'WS', `[WebSocket 隧道握手成功] 协议已升级: ${url.pathname}`);
       wss.handleUpgrade(nodeReq, socket, head, (clientWs) => {
+        trafficEngine.addActiveConnection();
         const workerClientSock = workerResp.webSocket;
         const workerServerSock = workerClientSock.peer;
 
-        clientWs.on('message', (data, isBinary) => {
+        let closedWs = false;
+        const cleanupWs = () => {
+          if (!closedWs) {
+            closedWs = true;
+            trafficEngine.removeActiveConnection();
+          }
+        };
+
+        clientWs.on('message', async (data, isBinary) => {
+          const raw = isBinary ? (data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)) : data.toString();
+          const len = raw.byteLength || raw.length || 0;
+          await trafficEngine.throttleUpload(len);
           if (workerServerSock && workerServerSock.readyState === 1) {
-            const raw = isBinary ? (data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)) : data.toString();
             workerServerSock.emit('message', { data: raw });
           }
         });
 
-        workerClientSock.on('message', (evt) => {
+        workerClientSock.on('message', async (evt) => {
+          const len = (evt.data && (evt.data.byteLength || evt.data.length)) || 0;
+          await trafficEngine.throttleDownload(len);
           if (clientWs.readyState === 1) {
             clientWs.send(evt.data);
           }
         });
 
         clientWs.on('close', (code, reason) => {
+          cleanupWs();
           workerClientSock.close(code, reason?.toString());
         });
 
         workerClientSock.on('close', (evt) => {
+          cleanupWs();
           clientWs.close(evt.code, evt.reason);
         });
       });
