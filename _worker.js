@@ -1,4 +1,4 @@
-﻿const Version = '2026-09-04 16:24:13';
+const Version = '2026-09-04 16:24:13';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io';
@@ -87,6 +87,20 @@ export default {
 					const params = new URLSearchParams(url.search);
 					params.set('token', await MD5MD5(host + userID));
 					return new Response('重定向中...', { status: 302, headers: { 'Location': `/sub?${params.toString()}` } });
+				} else if (访问路径 === 'logout') {// 处理登出逻辑并清除Cookie
+					const 响应 = new Response(JSON.stringify({ success: true, message: 'Logged out' }), {
+						status: 302,
+						headers: {
+							'Location': '/login',
+							'Content-Type': 'application/json;charset=utf-8',
+							'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+							'Pragma': 'no-cache',
+							'Expires': '0'
+						}
+					});
+					响应.headers.append('Set-Cookie', 'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax');
+					响应.headers.append('Set-Cookie', 'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT');
+					return 响应;
 				} else if (访问路径 === 'login') {//处理登录页面和登录请求
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];

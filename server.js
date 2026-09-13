@@ -422,11 +422,25 @@ const server = http.createServer(async (nodeReq, nodeRes) => {
 
     // H. Logout Endpoint
     if (pathname === '/logout') {
-      nodeRes.writeHead(302, {
+      const clearCookies = [
+        'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax',
+        'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+        'auth=; Path=/admin; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax',
+        'auth=; Path=/login; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax'
+      ];
+      nodeRes.writeHead(nodeReq.method === 'POST' ? 200 : 302, {
         'Location': '/login',
-        'Set-Cookie': 'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax'
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Set-Cookie': clearCookies
       });
-      nodeRes.end();
+      if (nodeReq.method === 'POST') {
+        nodeRes.end(JSON.stringify({ success: true, message: 'Logged out successfully' }));
+      } else {
+        nodeRes.end();
+      }
       return;
     }
 

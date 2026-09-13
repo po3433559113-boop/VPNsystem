@@ -681,6 +681,14 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
       transform: translateY(0);
       opacity: 1;
     }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .animate-spin {
+      animation: spin 1s linear infinite;
+    }
   </style>
 </head>
 <body>
@@ -726,7 +734,7 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
     <nav class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('tab-speed')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12A10 10 0 0 0 12 2v10z"/><path d="M21.17 8A10.06 10.06 0 0 0 12 2v6"/><circle cx="12" cy="12" r="10"/></svg>
-        实时网速与限速控制
+        实时网速监控
       </button>
       <button class="tab-btn" onclick="switchTab('tab-speedtest')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
@@ -746,11 +754,11 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
       </button>
       <button class="tab-btn" onclick="switchTab('tab-logs')">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-        系统审计日志
+        📋 查看操作日志 & 网速限制
       </button>
     </nav>
 
-    <!-- TAB 1: 实时网速与限速控制 (Real-time Speed & Limiter) -->
+    <!-- TAB 1: 实时网速监控 (Real-time Speed Telemetry) -->
     <section id="tab-speed" class="tab-pane active">
       <div style="display: flex; flex-direction: column; gap: 1.25rem;">
         
@@ -831,9 +839,15 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
               </div>
             </div>
 
-            <div style="display: flex; justify-content: space-around; padding: 0.5rem; background: var(--bg-elevated); border-radius: var(--radius-sm); font-size: 0.78rem; color: var(--text-secondary);">
-              <div>当前流控状态: <strong id="currentLimitStatusLabel" style="color: #60a5fa;">无限制</strong></div>
+            <div style="display: flex; justify-content: space-around; padding: 0.5rem; background: var(--bg-elevated); border-radius: var(--radius-sm); font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.75rem;">
+              <div>当前流控状态: <strong id="currentLimitStatusLabel" style="color: #60a5fa;">全速无限制</strong></div>
               <div>延迟 Ping: <strong id="realtimePingVal" style="color: #34d399;">-- ms</strong></div>
+            </div>
+
+            <div style="margin-top: 0.75rem; text-align: center;">
+              <button class="btn-secondary" style="font-size: 0.8rem; padding: 0.45rem 1rem; width: 100%;" onclick="switchTab('tab-logs')">
+                ⚙️ 前往「📋 查看操作日志」下方调整限速与QoS规则 &rarr;
+              </button>
             </div>
           </div>
 
@@ -853,104 +867,6 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
             <div class="chart-container">
               <canvas id="speedChart"></canvas>
             </div>
-          </div>
-        </div>
-
-        <!-- Bandwidth Limiting & Speed Control Box -->
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title-group">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-              <div>
-                <div class="card-title">网速控制与带宽限速调节器 (Bandwidth Controller)</div>
-                <div class="card-subtitle">采用令牌桶 (Token Bucket) 动态流控算法，实时调整隧道上传/下载速率限制，即刻生效！</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Quick Presets -->
-          <div class="form-group">
-            <label class="form-label">
-              <span>一键快速预设方案</span>
-              <span style="font-size: 0.75rem; color: var(--text-muted);">点击即填入推荐配置</span>
-            </label>
-            <div class="preset-pill-group">
-              <button class="preset-btn active" id="presetUnlimited" onclick="applyPreset('unlimited', 0, 0)">
-                ⚡ 无限制 (Full Speed)
-              </button>
-              <button class="preset-btn" id="presetStreaming" onclick="applyPreset('streaming', 30720, 10240)">
-                🎬 4K/8K超清流媒体 (30 MB/s)
-              </button>
-              <button class="preset-btn" id="presetBalanced" onclick="applyPreset('balanced', 5120, 2048)">
-                💼 日常办公网页 (5 MB/s)
-              </button>
-              <button class="preset-btn" id="presetGaming" onclick="applyPreset('gaming', 2048, 2048)">
-                🎮 游戏低延迟优化 (2 MB/s)
-              </button>
-              <button class="preset-btn" id="presetSaving" onclick="applyPreset('saving', 1024, 512)">
-                🛡️ 省流与防刷限速 (1 MB/s)
-              </button>
-            </div>
-          </div>
-
-          <!-- Sliders and Inputs -->
-          <div class="grid-2col" style="margin-top: 0.5rem;">
-            <!-- Download Speed Control -->
-            <div style="background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1.1rem; display: flex; flex-direction: column; gap: 0.75rem;">
-              <div style="display: flex; align-items: center; justify-content: space-between;">
-                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                  <span style="color: #10b981; font-weight: 700;">↓ 下行限速 (Download Limit)</span>
-                </div>
-                <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; cursor: pointer;">
-                  <input type="checkbox" id="downLimitEnable" onchange="toggleLimitFields()"> 启用下行限速
-                </label>
-              </div>
-
-              <input type="range" id="downLimitSlider" class="range-slider" min="0" max="102400" step="512" value="0" oninput="onSliderChange('down')">
-
-              <div style="display: flex; align-items: center; gap: 0.75rem;">
-                <div style="flex: 1;">
-                  <input type="number" id="downLimitInput" class="form-input font-mono" placeholder="0 表示不限速" value="0" oninput="onInputChange('down')">
-                </div>
-                <div style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); width: 90px;" id="downLimitDisplay">
-                  不限速
-                </div>
-              </div>
-            </div>
-
-            <!-- Upload Speed Control -->
-            <div style="background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1.1rem; display: flex; flex-direction: column; gap: 0.75rem;">
-              <div style="display: flex; align-items: center; justify-content: space-between;">
-                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                  <span style="color: #38bdf8; font-weight: 700;">↑ 上行限速 (Upload Limit)</span>
-                </div>
-                <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; cursor: pointer;">
-                  <input type="checkbox" id="upLimitEnable" onchange="toggleLimitFields()"> 启用上行限速
-                </label>
-              </div>
-
-              <input type="range" id="upLimitSlider" class="range-slider" min="0" max="102400" step="512" value="0" oninput="onSliderChange('up')">
-
-              <div style="display: flex; align-items: center; gap: 0.75rem;">
-                <div style="flex: 1;">
-                  <input type="number" id="upLimitInput" class="form-input font-mono" placeholder="0 表示不限速" value="0" oninput="onInputChange('up')">
-                </div>
-                <div style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); width: 90px;" id="upLimitDisplay">
-                  不限速
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Action Buttons -->
-          <div style="display: flex; align-items: center; justify-content: flex-end; gap: 0.75rem; margin-top: 0.5rem;">
-            <button class="btn-secondary" onclick="resetLimitsToUnlimited()">
-              重置为不限速
-            </button>
-            <button class="btn-primary" onclick="saveRateLimits()">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-              立即保存并应用限速
-            </button>
           </div>
         </div>
 
@@ -1148,23 +1064,129 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
       </div>
     </section>
 
-    <!-- TAB 6: 系统审计日志 (Logs) -->
+    <!-- TAB 6: 📋 查看操作日志与限速 (Logs & Rate Limiter) -->
     <section id="tab-logs" class="tab-pane">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title-group">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-            <div>
-              <div class="card-title">系统操作与访问审计日志</div>
-              <div class="card-subtitle">记录近期登录、订阅拉取与节点变更行为</div>
+      <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+        
+        <!-- 📋 查看操作日志 (Operation Logs) -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              <div>
+                <div class="card-title">📋 查看操作日志</div>
+                <div class="card-subtitle">实时记录节点访问、管理员登录、规则更新与订阅拉取行为</div>
+              </div>
             </div>
+            <button class="btn-header" onclick="fetchLogs()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+              刷新日志
+            </button>
           </div>
-          <button class="btn-header" onclick="fetchLogs()">刷新日志</button>
+
+          <div id="logContainer" style="max-height: 360px; overflow-y: auto; background: var(--bg-base); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">
+            正在加载审计日志...
+          </div>
         </div>
 
-        <div id="logContainer" style="max-height: 400px; overflow-y: auto; background: var(--bg-base); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-secondary); line-height: 1.6;">
-          正在加载审计日志...
+        <!-- ⚡ 限速功能 (Bandwidth Rate Limiter & QoS) - 放置在「📋 查看操作日志」正下方 -->
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <div>
+                <div class="card-title">⚡ 网速控制与带宽限速调节器 (Bandwidth Controller)</div>
+                <div class="card-subtitle">采用非阻塞微秒级令牌桶 (Token Bucket) 算法，实时限制代理通道上下行速率</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Quick Presets -->
+          <div class="form-group">
+            <label class="form-label">
+              <span>一键快速预设策略</span>
+              <span style="font-size: 0.75rem; color: var(--text-muted);">点击即应用推荐速率</span>
+            </label>
+            <div class="preset-pill-group">
+              <button class="preset-btn active" id="presetUnlimited" onclick="applyPreset('unlimited', 0, 0)">
+                ⚡ 无限制 (Full Speed)
+              </button>
+              <button class="preset-btn" id="presetStreaming" onclick="applyPreset('streaming', 30720, 10240)">
+                🎬 4K/8K超清流媒体 (30 MB/s)
+              </button>
+              <button class="preset-btn" id="presetBalanced" onclick="applyPreset('balanced', 5120, 2048)">
+                💼 日常办公网页 (5 MB/s)
+              </button>
+              <button class="preset-btn" id="presetGaming" onclick="applyPreset('gaming', 2048, 2048)">
+                🎮 游戏低延迟优化 (2 MB/s)
+              </button>
+              <button class="preset-btn" id="presetSaving" onclick="applyPreset('saving', 1024, 512)">
+                🛡️ 省流与防刷限速 (1 MB/s)
+              </button>
+            </div>
+          </div>
+
+          <!-- Sliders and Inputs -->
+          <div class="grid-2col" style="margin-top: 0.5rem;">
+            <!-- Download Speed Control -->
+            <div style="background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1.1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <span style="color: #10b981; font-weight: 700;">↓ 下行限速 (Download Limit)</span>
+                </div>
+                <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; cursor: pointer;">
+                  <input type="checkbox" id="downLimitEnable" onchange="toggleLimitFields()"> 启用下行限速
+                </label>
+              </div>
+
+              <input type="range" id="downLimitSlider" class="range-slider" min="0" max="102400" step="512" value="0" oninput="onSliderChange('down')">
+
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div style="flex: 1;">
+                  <input type="number" id="downLimitInput" class="form-input font-mono" placeholder="0 表示不限速" value="0" oninput="onInputChange('down')">
+                </div>
+                <div style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); width: 90px;" id="downLimitDisplay">
+                  不限速
+                </div>
+              </div>
+            </div>
+
+            <!-- Upload Speed Control -->
+            <div style="background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 1.1rem; display: flex; flex-direction: column; gap: 0.75rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <span style="color: #38bdf8; font-weight: 700;">↑ 上行限速 (Upload Limit)</span>
+                </div>
+                <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; cursor: pointer;">
+                  <input type="checkbox" id="upLimitEnable" onchange="toggleLimitFields()"> 启用上行限速
+                </label>
+              </div>
+
+              <input type="range" id="upLimitSlider" class="range-slider" min="0" max="102400" step="512" value="0" oninput="onSliderChange('up')">
+
+              <div style="display: flex; align-items: center; gap: 0.75rem;">
+                <div style="flex: 1;">
+                  <input type="number" id="upLimitInput" class="form-input font-mono" placeholder="0 表示不限速" value="0" oninput="onInputChange('up')">
+                </div>
+                <div style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); width: 90px;" id="upLimitDisplay">
+                  不限速
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div style="display: flex; align-items: center; justify-content: flex-end; gap: 0.75rem; margin-top: 0.5rem;">
+            <button class="btn-secondary" onclick="resetLimitsToUnlimited()">
+              重置为不限速
+            </button>
+            <button class="btn-primary" onclick="saveRateLimits()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+              立即保存并应用限速
+            </button>
+          </div>
         </div>
+
       </div>
     </section>
   </main>
@@ -1721,11 +1743,36 @@ export function renderAdminHtml({ host, userID, config, rateLimits, stats }) {
     }
 
     async function handleLogout() {
+      // 1. Immediate UI state transition
+      const btn = document.querySelector('button[onclick="handleLogout()"]');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="16"></circle></svg> 正在退出...';
+      }
+      showToast('正在安全退出管理员会话...');
+
+      // 2. Clear client-side cookies for all standard paths
+      const paths = ['/', '/admin', '/login'];
+      paths.forEach(p => {
+        document.cookie = `auth=; Path=${p}; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax`;
+        document.cookie = `auth=; Path=${p}; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT;`;
+      });
+
+      // 3. Clear storage
       try {
-        document.cookie = 'auth=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT;';
-        await fetch('/logout');
+        localStorage.clear();
+        sessionStorage.clear();
       } catch (_) {}
-      window.location.href = '/login';
+
+      // 4. Invalidate session on server
+      try {
+        await fetch('/logout', { method: 'POST', cache: 'no-store' });
+      } catch (_) {
+        try { await fetch('/logout', { method: 'GET', cache: 'no-store' }); } catch (_) {}
+      }
+
+      // 5. Instantly redirect
+      window.location.replace('/login');
     }
 
     // On Load
